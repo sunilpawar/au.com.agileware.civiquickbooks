@@ -88,6 +88,10 @@ class CRM_Civiquickbooks_Invoice {
           $dataService->throwExceptionOnError(FALSE);
 
           if ($accountsInvoice->Id) {
+            // get invoice SyncToken
+            $invoiceExiting = $this->getInvoiceFromQBO($record);
+            $accountsInvoice->SyncToken = $invoiceExiting->SyncToken;
+
             $result = $dataService->Update($accountsInvoice);
 
             if ($last_error = $dataService->getLastError()) {
@@ -198,25 +202,49 @@ class CRM_Civiquickbooks_Invoice {
 
     $dataService = CRM_Quickbooks_APIHelper::getAccountingDataServiceObject();
     $result = [];
-
+    $paymentInstrument = CRM_Contribute_BAO_Contribution::buildOptions('payment_instrument_id', 'create');
+    $quickBooksSettings = civicrm_api3('Setting', 'get', array('group' => "QuickBooks Online Settings"));
+    $quickBooksSettings = $quickBooksSettings['values'][$quickBooksSettings['id']];
+    $quickbooksAccountId = $quickBooksSettings["quickbooks_account_id"];
     foreach($payments['values'] as $payment) {
       $txnDate = $payment['trxn_date'];
       $total = sprintf('%.5f', $payment['total_amount']);
-      $QBOPayment = \QuickBooksOnline\API\Facades\Payment::create(
-        [
-          'TotalAmt' => $total,
-          'CustomerRef' => $account_invoice->CustomerRef,
-          'CurrencyRef' => $account_invoice->CurrencyRef,
-          'TxnDate' => $txnDate,
-          'Line' => [
-            'Amount' => $total,
-            'LinkedTxn' => [[
-              'TxnType' => 'Invoice',
-              'TxnId' => $account_invoice->Id,
-            ]],
-          ],
-        ]
-      );
+      $paymentInput = [
+        'TotalAmt' => $total,
+        'CustomerRef' => $account_invoice->CustomerRef,
+        'CurrencyRef' => $account_invoice->CurrencyRef,
+        'TxnDate' => $txnDate,
+        'Line' => [
+          'Amount' => $total,
+          'LinkedTxn' => [[
+            'TxnType' => 'Invoice',
+            'TxnId' => $account_invoice->Id,
+          ]],
+        ],
+      ];
+
+      // check payment instrument present on record
+      if (!empty($payment['payment_instrument_id'])) {
+        $paymentMethodId = self::getPaymentMethod($paymentInstrument[$payment['payment_instrument_id']]);
+        if (!empty($paymentMethodId)) {
+          $paymentInput['PaymentMethodRef'] = ['value' => $paymentMethodId];
+        }
+      }
+
+      // set Account ID
+      if ($quickbooksAccountId) {
+        $paymentInput['DepositToAccountRef'] = ['value' => $quickbooksAccountId];
+      }
+
+      // set Transaction ID
+      if (!empty($payment['trxn_id'])) {
+        $paymentInput['PaymentRefNum'] = $payment['trxn_id'];
+      }
+      else if (!empty($payment['check_number'])) {
+        $paymentInput['PaymentRefNum'] = $payment['check_number'];
+      }
+
+      $QBOPayment = \QuickBooksOnline\API\Facades\Payment::create($paymentInput);
       $result[] = $dataService->Add($QBOPayment);
     }
 
@@ -404,14 +432,43 @@ class CRM_Civiquickbooks_Invoice {
     $db_contribution['status'] = $this->contribution_status[$db_contribution['contribution_status_id']];
 
     $cancelledStatuses = array('failed', 'cancelled');
+    try {
+      $qb_account = CRM_Civiquickbooks_Contact::getContact($db_contribution['contact_id']);
+      $qb_id = $qb_account['accounts_contact_id'];
+      if (empty($qb_id)) {
+        throw new CiviCRM_API3_Exception('Account ID is missing while syncing Invoice');
+      }
+    }
+    catch (CiviCRM_API3_Exception $exception) {
+      // Try to get Matching Contact from QB
+      $quickbooks = new CRM_Civiquickbooks_Contact();
+      $quickbooks->pull(['contact_id' => $db_contribution['contact_id']]);
 
-    $qb_account = civicrm_api3('account_contact', 'getsingle', array(
-      'contact_id' => $db_contribution['contact_id'],
-      'plugin' => $this->plugin,
-      'connector_id' => 0,
-    ));
+      // Check Pull operation have any data
+      $qb_account = CRM_Civiquickbooks_Contact::getContact($db_contribution['contact_id']);
+      $qb_id = $qb_account['accounts_contact_id'];
+      if (empty($qb_id)) {
+        try {
+          // push contact to QB
+          $quickbooks = new CRM_Civiquickbooks_Contact();
+          $quickbooks->push(['contact_id' => $db_contribution['contact_id']]);
 
-    $qb_id = $qb_account['accounts_contact_id'];
+          $qb_account = CRM_Civiquickbooks_Contact::getContact($db_contribution['contact_id']);
+          $qb_id = $qb_account['accounts_contact_id'];
+          if (empty($qb_id)) {
+            throw new CiviCRM_API3_Exception('Account ID is missing while syncing Invoice');
+          }
+        }
+        catch (CiviCRM_API3_Exception $exception) {
+          CRM_Core_Error::debug_log_message("Invoice Sync skipped for Contribution ID {$contributionID}, no matching Account Contact id found.");
+
+          return NULL;
+        }
+      }
+    }
+    catch (Exception $e) {
+      return;
+    }
 
     if (in_array(strtolower($db_contribution['status']), $cancelledStatuses)) {
       //according to the revised task description, we are not going to synch cancelled or failed contributions that are just created and not synched before.
@@ -799,6 +856,28 @@ class CRM_Civiquickbooks_Invoice {
   }
 
   /**
+   * get Payment Method for syncing
+   * @param $name
+   */
+  public static function getPaymentMethod($name) {
+    $name = strtolower($name);
+    $paymentMethods =& \Civi::$statics[__CLASS__][__FUNCTION__];
+    if (!isset($paymentMethods[$name])) {
+      $query = 'SELECT * From PaymentMethod';
+      $dataService = CRM_Quickbooks_APIHelper::getAccountingDataServiceObject();
+      $result = $dataService->Query($query);
+      if (empty($result)) {
+        return;
+      }
+      foreach ($result as $paymentMethodObject) {
+        $paymentMethods[strtolower($paymentMethodObject->Name)] = $paymentMethodObject->Id;
+      }
+    }
+
+    return $paymentMethods[$name];
+  }
+
+  /**
    * Map fields for a cancelled contribution to be updated to QuickBooks.
    *
    * @param $contributionID int
@@ -900,6 +979,11 @@ class CRM_Civiquickbooks_Invoice {
         'limit' => $limit,
       ),
     );
+
+    if (isset($params['last_sync_date'])) {
+      $criteria['last_sync_date'] = $params['last_sync_date'];
+    }
+
     if (isset($params['contribution_id'])) {
       $criteria['contribution_id'] = $params['contribution_id'];
       unset($criteria['accounts_needs_update']);

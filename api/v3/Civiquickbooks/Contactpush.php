@@ -26,7 +26,7 @@ function civicrm_api3_civiquickbooks_ContactPush($params) {
   $options = _civicrm_api3_get_options_from_params($params);
 
   $quickbooks = new CRM_Civiquickbooks_Contact();
-  $output = $quickbooks->push($options['limit']);
+  $output = $quickbooks->push($params, $options['limit']);
 
   // ALTERNATIVE: $returnValues = array(); // OK, success
   // ALTERNATIVE: $returnValues = array("Some value"); // OK, return a single value

@@ -1,4 +1,8 @@
 <?php
+/** Load CiviX ExtensionUtil class and bundled autoload resolver. **/
+use CRM_Civiquickbooks_ExtensionUtil as E;
+
+require E::path('vendor/autoload.php');
 
 class CRM_Quickbooks_APIHelper {
 
@@ -97,7 +101,7 @@ class CRM_Quickbooks_APIHelper {
       'accessTokenKey' => $QBCredentials['accessToken'],
       'refreshTokenKey' => $QBCredentials['refreshToken'],
       'QBORealmID' => $QBCredentials['realMId'],
-      'baseUrl' => "Production",
+      'baseUrl' => $QBCredentials['quickbooksEnvironment'],
     );
 
     if ($forRefreshToken) {
@@ -193,6 +197,7 @@ class CRM_Quickbooks_APIHelper {
     $realMId = $quickBooksSettings["quickbooks_realmId"];
     $tokenExpiryDate = $quickBooksSettings["quickbooks_access_token_expiryDate"];
     $refreshTokenExpiryDate = $quickBooksSettings["quickbooks_refresh_token_expiryDate"];
+    $quickbooksEnvironment = $quickBooksSettings["quickbooks_environment"];
 
     return array(
       'clientID' => $clientID,
@@ -202,6 +207,7 @@ class CRM_Quickbooks_APIHelper {
       'realMId' => $realMId,
       'accessTokenExpiryDate' => $tokenExpiryDate,
       'refreshTokenExpiryDate' => $refreshTokenExpiryDate,
+      'quickbooksEnvironment' => $quickbooksEnvironment,
     );
   }
 
@@ -276,5 +282,37 @@ class CRM_Quickbooks_APIHelper {
     }
 
     return $error_message;
+  }
+
+  /**
+   * Function to show environment Type
+   * @return array
+   */
+  public static function environmentType() {
+    return [
+      'Production' => 'Production',
+      'development' => 'Development'
+    ];
+  }
+
+  /**
+   * Function to get Accounts name and id.
+   * @return array
+   */
+  public static function accountsName() {
+    try {
+      $query = "SELECT * From Account where AccountType = 'Bank' AND Classification = 'Asset'";
+      $dataService = \CRM_Quickbooks_APIHelper::getAccountingDataServiceObject();
+      $result = $dataService->Query($query);
+      $accountNames = [];
+      foreach ($result as $accountNameObject) {
+        $accountNames[$accountNameObject->Id] = $accountNameObject->Name;
+      }
+
+      return $accountNames;
+    }
+    catch (Exception $e) {
+      return [];
+    }
   }
 }
